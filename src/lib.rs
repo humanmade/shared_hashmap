@@ -37,9 +37,9 @@ impl<
         unsafe { (self as *const Bucket<K, V>).add(1).byte_add(self.key_size) as *mut u8 }
     }
     fn get_value(&self) -> V {
-        return unsafe {
+        unsafe {
             bincode::deserialize(&*slice_from_raw_parts(self.value_ptr(), self.value_size)).unwrap()
-        };
+        }
     }
     fn set_value(&mut self, value: V) {
         let value = bincode::serialize(&value).unwrap();
@@ -49,9 +49,9 @@ impl<
         }
     }
     fn get_key(&self) -> K {
-        return unsafe {
+        unsafe {
             bincode::deserialize(&*slice_from_raw_parts(self.key_ptr(), self.value_size)).unwrap()
-        };
+        }
     }
     fn set_key(&mut self, key: K) {
         let key = bincode::serialize(&key).unwrap();
@@ -237,7 +237,6 @@ impl<
         if let Some(bucket) = bucket {
             // Get around the borrow checker... oh dear.
             let to_remove = bucket as *const Bucket<K, V>;
-            drop(bucket);
             return self.remove(&unsafe { &*to_remove }.get_key());
         }
         None
