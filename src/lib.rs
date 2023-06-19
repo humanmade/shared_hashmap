@@ -7,6 +7,15 @@ use std::{marker::PhantomData, mem::size_of};
 
 use shared_memory::{Shmem, ShmemConf};
 
+fn round_to_boundary<T>(num: usize) -> usize {
+    let multiple = std::mem::align_of::<T>();
+    if num % multiple == 0 {
+        num
+    } else {
+        num + multiple - num % multiple
+    }
+}
+
 /// After the bucket we store the memory: [Bucket<K, V>][key_data][value_data]
 #[derive(Debug)]
 pub struct Bucket<K, V> {
@@ -58,7 +67,9 @@ impl<K, V> Bucket<K, V> {
         unsafe {
             (self as *const Bucket<K, V>)
                 .add(1)
-                .byte_add(self.value_size + self.key_size) as *mut Bucket<K, V>
+                .byte_add(round_to_boundary::<Bucket<K, V>>(
+                    self.value_size + self.key_size,
+                )) as *mut Bucket<K, V>
         }
     }
 }
@@ -110,7 +121,7 @@ impl<
                 Some(item) => removed = Some(item),
                 None => {
                     return Err(Error::TooLargeError);
-                },
+                }
             }
         }
 
@@ -121,7 +132,8 @@ impl<
             // Key must come before value
             (*ptr).set_key(key);
             (*ptr).set_value(value);
-            self.used += size_of::<Bucket<K, V>>() + (*ptr).value_size + (*ptr).key_size;
+            let extra_size = round_to_boundary::<Bucket<K, V>>((*ptr).value_size + (*ptr).key_size);
+            self.used += size_of::<Bucket<K, V>>() + extra_size;
         }
         Ok(removed)
     }
@@ -158,7 +170,8 @@ impl<
             }
             if &bucket.get_key() == key {
                 self.bucket_count -= 1;
-                self.used -= size_of::<Bucket<K, V>>() + bucket.value_size + bucket.key_size;
+                self.used -= size_of::<Bucket<K, V>>()
+                    + round_to_boundary::<Bucket<K, V>>(bucket.value_size + bucket.key_size);
                 unsafe {
                     // Shift all the next memory back.
                     if !next_bucket.is_null() {
