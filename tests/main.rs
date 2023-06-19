@@ -6,7 +6,7 @@ use std::thread::sleep;
 use std::thread::spawn;
 use std::time::Duration;
 
-use shared_hashmap::{SharedMemoryHashMap};
+use shared_hashmap::SharedMemoryHashMap;
 
 #[test]
 fn test_insert() {
