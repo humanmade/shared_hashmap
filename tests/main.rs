@@ -6,7 +6,13 @@ use std::thread::sleep;
 use std::thread::spawn;
 use std::time::Duration;
 
-use shared_hashmap::SharedMemoryHashMap;
+use shared_hashmap::{SharedMemoryHashMap, Bucket, SharedMemoryContents};
+
+#[test]
+fn test_alignment() {
+    println!("i8 alignment is {}", std::mem::align_of::<Bucket<String, String>>());
+    println!("i8 alignment is {}", std::mem::align_of::<SharedMemoryContents<String, String>>());
+}
 
 #[test]
 fn test_insert() {

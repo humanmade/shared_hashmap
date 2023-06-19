@@ -67,7 +67,7 @@ impl<K, V> Bucket<K, V> {
 pub enum Error {
     TooLargeError,
 }
-struct SharedMemoryContents<K, V> {
+pub struct SharedMemoryContents<K, V> {
     bucket_count: usize,
     used: usize,
     phantom: PhantomData<(K, V)>,
@@ -281,7 +281,7 @@ impl<
             lock: unsafe {
                 Mutex::new(
                     ptr as *mut u8,
-                    (ptr as *mut u8).byte_add(Mutex::size_of(Some(ptr))),
+                    (ptr as *mut u8).add(Mutex::size_of(Some(ptr))),
                 )
                 .unwrap()
                 .0
@@ -404,7 +404,7 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> Clone
             lock: unsafe {
                 Mutex::from_existing(
                     ptr as *mut u8,
-                    (ptr as *mut u8).byte_add(Mutex::size_of(Some(ptr))),
+                    (ptr as *mut u8).add(Mutex::size_of(Some(ptr))),
                 )
                 .unwrap()
                 .0
