@@ -413,10 +413,3 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> Clone
         }
     }
 }
-
-fn main() {
-
-    // map.iter().for_each(|bucket| {
-    //     println!("{:?}", bucket.value);
-    // });
-}

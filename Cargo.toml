@@ -16,4 +16,4 @@ nix = { version = "0.26.2", features = ["process"] }
 
 [lib]
 name = "shared_hashmap"
-path = "src/main.rs"
+path = "src/lib.rs"
