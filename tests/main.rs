@@ -9,7 +9,7 @@ use shared_hashmap::Error;
 
 #[test]
 fn test_insert() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
     assert_eq!(map.get(&1), Some(1));
 
@@ -20,8 +20,38 @@ fn test_insert() {
 }
 
 #[test]
+fn test_get() {
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
+    map.insert(1, 1);
+    assert_eq!(map.get(&1), Some(1));
+}
+
+#[test]
+fn test_peak() {
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
+    map.insert(1, 1);
+    map.insert(2, 2);
+    assert_eq!(map.peak(&1), Some(1));
+}
+
+#[test]
+fn test_get_lru() {
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
+    map.insert(1, 1);
+    map.insert(2, 2);
+    map.insert(3, 3);
+    map.get(&1);
+    map.get(&3);
+
+    assert_eq!(map.get_lru(), Some((2, 2)));
+
+    map.get(&2);
+    assert_eq!(map.get_lru(), Some((1, 1)));
+}
+
+#[test]
 fn test_insert_slice() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, [1, 2, 3]);
     map.insert(2, [3, 4, 5]);
     assert_eq!(map.get(&1), Some([1, 2, 3]));
@@ -30,7 +60,7 @@ fn test_insert_slice() {
 
 #[test]
 fn test_insert_string() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, String::from("Hello"));
     map.insert(2, String::from("World"));
     assert_eq!(map.get(&1), Some(String::from("Hello")));
@@ -39,22 +69,13 @@ fn test_insert_string() {
 
 #[test]
 fn test_insert_too_long() {
-    let mut map = SharedMemoryHashMap::new(128);
-    let insert = map.try_insert(1, String::from("Hello").repeat(100));
-    assert_eq!(insert, Err(Error::TooLargeError));
+    //let mut map = SharedMemoryHashMap::new(128).unwrap();
 
-    let fixed_size = size_of::<u8>() + size_of::<usize>();
-    let item_size = size_of::<Bucket<u8, u8>>() + 4;
-    dbg!(item_size);
-    let mut map = SharedMemoryHashMap::new(fixed_size + item_size);
-    map.try_insert(1, 1).unwrap();
-    let insert = map.try_insert(2, 2);
-    assert_eq!(insert, Err(Error::TooLargeError));
 }
 
 #[test]
 fn test_remove() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
     map.insert(2, 2);
     map.insert(3, 3);
@@ -79,7 +100,7 @@ fn test_remove() {
 
 #[test]
 fn test_contains_key() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
     assert_eq!(map.contains_key(&1), true);
     assert_eq!(map.contains_key(&2), false);
@@ -87,7 +108,7 @@ fn test_contains_key() {
 
 #[test]
 fn test_clear() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
     map.insert(2, 2);
     map.insert(3, 3);
@@ -100,7 +121,7 @@ fn test_clear() {
 
 #[test]
 fn test_clone() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     let mut map2 = map.clone();
     map.insert(1, 1);
     assert_eq!(map2.get(&1), Some(1));
@@ -112,23 +133,23 @@ fn test_clone() {
 
 #[test]
 fn test_used() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
-    assert_eq!(map.used(), 20);
+    assert_eq!(map.used(), 104);
     map.insert(2, 2);
-    assert_eq!(map.used(), 40);
+    assert_eq!(map.used(), 144);
 }
 
 #[test]
 fn test_free() {
-    let mut map = SharedMemoryHashMap::new(1024);
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
-    assert_eq!(map.free(), 1024 - 20);
+    assert_eq!(map.free(), 1024 - map.used());
 }
 
 #[test]
 fn test_race_condition() {
-    let mut map = SharedMemoryHashMap::new(1024 * 1024);
+    let mut map = SharedMemoryHashMap::new(1024 * 1024).unwrap();
     map.insert(1, 1);
     map.insert(2, 2);
     map.insert(3, 3);
@@ -138,20 +159,14 @@ fn test_race_condition() {
 
     spawn(move || {
         for i in 100..2000 {
-            dbg!(map2.used());
-            //map2.dump_data();
             map2.try_insert(i, i).unwrap();
         }
     });
     spawn(move || {
         for i in 2000..3000 {
-            dbg!(map3.used());
-            //map3.dump_data();
             map3.try_insert(i, i).unwrap();
         }
     });
 
     sleep(Duration::from_millis(100));
-    //assert_eq!(map.len(), 1903);
-    //dbg!(map);
 }

@@ -2,30 +2,53 @@
 
 use raw_sync::locks::{LockImpl, LockInit, Mutex};
 use std::ptr::slice_from_raw_parts;
+use std::time::{Instant};
 use std::{marker::PhantomData, mem::size_of};
 
 use shared_memory::{Shmem, ShmemConf};
 
+/// After the bucket we store the memory: [Bucket<K, V>][key_data][value_data]
 #[derive(Debug)]
 pub struct Bucket<K, V> {
-    key: K,
     value_size: usize,
-    phantom: PhantomData<V>,
+    key_size: usize,
+    phantom: PhantomData<(K, V)>,
+    last_accessed: Instant,
 }
 
-impl<K, V: serde::Serialize + serde::Deserialize<'static>> Bucket<K, V> {
-    fn get_value(&self) -> Option<V> {
+impl<
+        K: serde::Serialize + serde::Deserialize<'static>,
+        V: serde::Serialize + serde::Deserialize<'static>,
+    > Bucket<K, V>
+{
+    fn key_ptr(&self) -> *mut u8 {
+        unsafe { (self as *const Bucket<K, V>).add(1) as *mut u8 }
+    }
+    fn value_ptr(&self) -> *mut u8 {
+        unsafe { (self as *const Bucket<K, V>).add(1).byte_add(self.key_size) as *mut u8 }
+    }
+    fn get_value(&self) -> V {
         return unsafe {
-            let value = (self as *const Bucket<K, V>).add(1) as *mut u8;
-            bincode::deserialize(&*slice_from_raw_parts(value, self.value_size)).ok()
+            bincode::deserialize(&*slice_from_raw_parts(self.value_ptr(), self.value_size)).unwrap()
         };
     }
     fn set_value(&mut self, value: V) {
         let value = bincode::serialize(&value).unwrap();
         self.value_size = value.len();
         unsafe {
-            let ptr = (self as *mut Bucket<K, V>).add(1) as *mut u8;
-            core::ptr::copy(value.as_ptr(), ptr as *mut u8, value.len());
+            core::ptr::copy(value.as_ptr(), self.value_ptr(), value.len());
+        }
+    }
+    fn get_key(&self) -> K {
+        return unsafe {
+            bincode::deserialize(&*slice_from_raw_parts(self.key_ptr(), self.value_size)).unwrap()
+        };
+    }
+    fn set_key(&mut self, key: K) {
+        let key = bincode::serialize(&key).unwrap();
+        self.key_size = key.len();
+        unsafe {
+            core::ptr::copy(key.as_ptr(), self.key_ptr(), key.len());
         }
     }
 }
@@ -35,7 +58,7 @@ impl<K, V> Bucket<K, V> {
         unsafe {
             (self as *const Bucket<K, V>)
                 .add(1)
-                .byte_add(self.value_size) as *mut Bucket<K, V>
+                .byte_add(self.value_size + self.key_size) as *mut Bucket<K, V>
         }
     }
 }
@@ -51,9 +74,13 @@ struct SharedMemoryContents<K, V> {
     size: usize,
 }
 
-impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemoryContents<K, V> {
-    fn bucket_iter(&self) -> SharedMemoryHashMapIter<K, V> {
-        SharedMemoryHashMapIter {
+impl<
+        K: PartialEq + serde::Serialize + serde::Deserialize<'static>,
+        V: serde::Serialize + serde::Deserialize<'static>,
+    > SharedMemoryContents<K, V>
+{
+    fn bucket_iter(&self) -> SharedMemoryHashMapBucketIter<K, V> {
+        SharedMemoryHashMapBucketIter {
             current: 0,
             current_ptr: self.buckets_ptr(),
             map: self,
@@ -64,35 +91,49 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
         unsafe { (self as *const SharedMemoryContents<K, V>).add(1) as *mut Bucket<K, V> }
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Option<()> {
-        self.try_insert(key, value).ok()
-    }
-
     pub fn try_insert(&mut self, key: K, value: V) -> Result<(), Error> {
         let value_size = bincode::serialized_size(&value).unwrap() as usize;
+        let key_size = bincode::serialized_size(&key).unwrap() as usize;
         let bucket = Bucket {
-            key,
-            phantom: PhantomData::<V>,
+            phantom: PhantomData::<(K, V)>,
             value_size: 0,
+            key_size: 0,
+            last_accessed: Instant::now(),
         };
         let ptr = unsafe { self.buckets_ptr().byte_add(self.used) };
-
-        if self.used + size_of::<Bucket<K, V>>() + value_size > self.size {
+        if size_of::<Bucket<K, V>>() + value_size > self.size {
             return Err(Error::TooLargeError);
         }
+
+        while self.used + size_of::<Bucket<K, V>>() + value_size + key_size > self.size {
+            self.evict();
+        }
+
         unsafe {
             core::ptr::copy(&bucket, ptr, 1);
             self.bucket_count += 1;
+            // Key must come before value
+            (*ptr).set_key(key);
             (*ptr).set_value(value);
-            self.used += size_of::<Bucket<K, V>>() + (*ptr).value_size;
+            self.used += size_of::<Bucket<K, V>>() + (*ptr).value_size + (*ptr).key_size;
         }
         Ok(())
     }
 
     pub fn get(&mut self, key: &K) -> Option<V> {
         for bucket in self.bucket_iter() {
-            if bucket.key == *key {
-                return bucket.get_value();
+            if bucket.get_key() == *key {
+                bucket.last_accessed = Instant::now();
+                return Some(bucket.get_value());
+            }
+        }
+        None
+    }
+
+    pub fn peak(&self, key: &K) -> Option<V> {
+        for bucket in self.bucket_iter() {
+            if bucket.get_key() == *key {
+                return Some(bucket.get_value());
             }
         }
         None
@@ -109,9 +150,9 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
             if current_index + 1 < self.len() {
                 next_bucket = bucket.next()
             }
-            if &bucket.key == key {
+            if &bucket.get_key() == key {
                 self.bucket_count -= 1;
-                self.used -= size_of::<Bucket<K, V>>() + bucket.value_size;
+                self.used -= size_of::<Bucket<K, V>>() + bucket.value_size + bucket.key_size;
                 unsafe {
                     // Shift all the next memory back.
                     if !next_bucket.is_null() {
@@ -144,7 +185,7 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
 
     pub fn contains_key(&self, key: &K) -> bool {
         for bucket in self.bucket_iter() {
-            if bucket.key == *key {
+            if bucket.get_key() == *key {
                 return true;
             }
         }
@@ -154,20 +195,47 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
     pub fn clear(&mut self) {
         self.bucket_count = 0;
     }
+
+    pub fn get_lru(&self) -> Option<&Bucket<K, V>> {
+        let mut oldest_bucket: Option<&Bucket<K, V>> = None;
+
+        for bucket in self.bucket_iter() {
+            match oldest_bucket {
+                None => {
+                    oldest_bucket = Some(bucket);
+                }
+                Some(oldest) => {
+                    if bucket.last_accessed < oldest.last_accessed {
+                        oldest_bucket = Some(bucket);
+                    }
+                }
+            }
+        }
+        oldest_bucket
+    }
+    pub fn evict(&mut self) {
+        let bucket = self.get_lru();
+        if let Some(bucket) = bucket {
+            // Get around the borrow checker... oh dear.
+            let to_remove = bucket as *const Bucket<K, V>;
+            drop(bucket);
+            self.remove(&unsafe { &*to_remove }.get_key());
+        }
+    }
 }
 
-pub struct SharedMemoryHashMapIter<'a, K, V> {
+pub struct SharedMemoryHashMapBucketIter<'a, K, V> {
     current: usize,
     current_ptr: *mut Bucket<K, V>,
     map: &'a SharedMemoryContents<K, V>,
 }
 
-impl<'a, K, V> Iterator for SharedMemoryHashMapIter<'a, K, V> {
-    type Item = &'a Bucket<K, V>;
+impl<'a, K, V> Iterator for SharedMemoryHashMapBucketIter<'a, K, V> {
+    type Item = &'a mut Bucket<K, V>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.map.bucket_count {
-            let item = unsafe { &*self.current_ptr };
+            let item = unsafe { &mut *self.current_ptr };
             self.current += 1;
             self.current_ptr = item.next();
             Some(item)
@@ -188,26 +256,19 @@ pub struct SharedMemoryHashMap<K, V> {
     phantom: PhantomData<(K, V)>,
 }
 
-// impl<K: PartialEq + std::fmt::Debug, V: serde::Serialize + serde::Deserialize<'static>> std::fmt::Debug for SharedMemoryHashMap<K, V> {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         self.bucket_iter().for_each(|b| {
-//             f.debug_struct("Bucket").field("key", &b.key).finish();
-//         });
-//         f.debug_struct("SharedMemoryHashMap")
-//             .field("buckets", &self.buckets)
-//             .field("bucket_count", unsafe { &*self.bucket_count } )
-//             //.field("lock", &self.lock.)
-//             .field("end", &self.end)
-//             .finish()
-//     }
-// }
-
-impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemoryHashMap<K, V> {
-    pub fn new(size: usize) -> Self {
+impl<
+        K: PartialEq + serde::Serialize + serde::Deserialize<'static>,
+        V: serde::Serialize + serde::Deserialize<'static>,
+    > SharedMemoryHashMap<K, V>
+{
+    pub fn new(size: usize) -> Result<Self, Error> {
         let shm_conf = ShmemConf::default().size(size);
         let shm = shm_conf.create().unwrap();
         let ptr = shm.as_ptr();
-        let size = shm.len();
+        if size < Mutex::size_of(Some(ptr)) + size_of::<SharedMemoryContents<K, V>>() {
+            return Err(Error::TooLargeError);
+        }
+        let size = shm.len() - Mutex::size_of(Some(ptr));
         let hashmap = Self {
             shm,
             lock: unsafe {
@@ -235,23 +296,12 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
             }
         }
 
-        hashmap
+        Ok(hashmap)
     }
 
     pub fn lock(&self) -> Result<raw_sync::locks::LockGuard<'_>, Box<dyn std::error::Error>> {
         self.lock.lock()
     }
-
-    // pub fn dump_data(&self) -> Vec<u8> {
-    //     for i in 0..500 {
-    //         unsafe {
-    //             dbg!( self.buckets.byte_add(i) as *mut u8, *(self.buckets.byte_add(i) as *mut u8 ));
-    //         }
-    //     }
-    //     unsafe {
-    //         &*slice_from_raw_parts(self.buckets as _, 20)
-    //     }.to_vec()
-    // }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<()> {
         self.try_insert(key, value).ok()
@@ -267,6 +317,20 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
         let lock = self.lock().unwrap();
         let contents = unsafe { &mut *(*lock as *mut SharedMemoryContents<K, V>) };
         contents.get(key)
+    }
+
+    pub fn peak(&self, key: &K) -> Option<V> {
+        let lock = self.lock().unwrap();
+        let contents = unsafe { &*(*lock as *mut SharedMemoryContents<K, V>) };
+        contents.peak(key)
+    }
+
+    pub fn get_lru(&self) -> Option<(K, V)> {
+        let lock = self.lock().unwrap();
+        let contents = unsafe { &*(*lock as *mut SharedMemoryContents<K, V>) };
+        contents
+            .get_lru()
+            .map(|bucket| (bucket.get_key(), bucket.get_value()))
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
@@ -290,7 +354,7 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> SharedMemo
     pub fn used(&self) -> usize {
         let lock = self.lock().unwrap();
         let contents = unsafe { &mut *(*lock as *mut SharedMemoryContents<K, V>) };
-        contents.used()
+        contents.used() + Mutex::size_of(Some(*lock))
     }
 
     pub fn free(&self) -> usize {
@@ -335,7 +399,6 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> Clone
 }
 
 fn main() {
-    let mut map: SharedMemoryHashMap<u8, u8> = SharedMemoryHashMap::new(1024);
 
     // map.iter().for_each(|bucket| {
     //     println!("{:?}", bucket.value);
