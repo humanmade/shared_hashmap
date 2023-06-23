@@ -261,6 +261,7 @@ pub struct SharedMemoryHashMapIter<'a, K, V> {
     current: usize,
     current_ptr: *mut Bucket<K, V>,
     map: &'a SharedMemoryContents<K, V>,
+    #[allow(dead_code)]
     lock: LockGuard<'a>,
 }
 
