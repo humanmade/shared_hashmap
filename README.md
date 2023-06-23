@@ -1,5 +1,7 @@
 # Shared HashMap
 
+[![Continuous integration](https://github.com/humanmade/shared_hashmap/actions/workflows/build.yml/badge.svg)](https://github.com/humanmade/shared_hashmap/actions/workflows/build.yml)
+
 A shared memory hashmap including LRU eviction.
 
 This crate provides a shared hashmap limited by memory size that can be used between difference processes and thread. This is achieved by using the [shared_memory](https://github.com/elast0ny/shared_memory) crate and [raw_sync-rs](https://github.com/elast0ny/raw_sync-rs) for IPC mutexes.
