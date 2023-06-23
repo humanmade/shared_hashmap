@@ -1,6 +1,6 @@
 #![feature(pointer_byte_offsets)]
 
-use raw_sync::locks::{LockImpl, LockInit, Mutex, LockGuard};
+use raw_sync::locks::{LockGuard, LockImpl, LockInit, Mutex};
 use std::ptr::slice_from_raw_parts;
 use std::time::Instant;
 use std::{marker::PhantomData, mem::size_of};
