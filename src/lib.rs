@@ -1,6 +1,6 @@
 #![feature(pointer_byte_offsets)]
 
-use raw_sync::locks::{LockImpl, LockInit, Mutex};
+use raw_sync::locks::{LockImpl, LockInit, Mutex, LockGuard};
 use std::ptr::slice_from_raw_parts;
 use std::time::Instant;
 use std::{marker::PhantomData, mem::size_of};
@@ -25,21 +25,11 @@ pub struct Bucket<K, V> {
     last_accessed: Instant,
 }
 
-impl<
-        K: serde::Serialize + serde::Deserialize<'static>,
-        V: serde::Serialize + serde::Deserialize<'static>,
-    > Bucket<K, V>
+impl<K: serde::Serialize + serde::Deserialize<'static>, V: serde::Serialize + serde::Deserialize<'static>>
+    Bucket<K, V>
 {
-    fn key_ptr(&self) -> *mut u8 {
-        unsafe { (self as *const Bucket<K, V>).add(1) as *mut u8 }
-    }
-    fn value_ptr(&self) -> *mut u8 {
-        unsafe { (self as *const Bucket<K, V>).add(1).byte_add(self.key_size) as *mut u8 }
-    }
     fn get_value(&self) -> V {
-        unsafe {
-            bincode::deserialize(&*slice_from_raw_parts(self.value_ptr(), self.value_size)).unwrap()
-        }
+        unsafe { bincode::deserialize(&*slice_from_raw_parts(self.value_ptr(), self.value_size)).unwrap() }
     }
     fn set_value(&mut self, value: V) {
         let value = bincode::serialize(&value).unwrap();
@@ -49,9 +39,7 @@ impl<
         }
     }
     fn get_key(&self) -> K {
-        unsafe {
-            bincode::deserialize(&*slice_from_raw_parts(self.key_ptr(), self.value_size)).unwrap()
-        }
+        unsafe { bincode::deserialize(&*slice_from_raw_parts(self.key_ptr(), self.key_size)).unwrap() }
     }
     fn set_key(&mut self, key: K) {
         let key = bincode::serialize(&key).unwrap();
@@ -63,13 +51,18 @@ impl<
 }
 
 impl<K, V> Bucket<K, V> {
+    fn key_ptr(&self) -> *mut u8 {
+        unsafe { (self as *const Bucket<K, V>).add(1) as *mut u8 }
+    }
+    fn value_ptr(&self) -> *mut u8 {
+        unsafe { (self as *const Bucket<K, V>).add(1).byte_add(self.key_size) as *mut u8 }
+    }
     fn next(&self) -> *mut Bucket<K, V> {
         unsafe {
             (self as *const Bucket<K, V>)
                 .add(1)
-                .byte_add(round_to_boundary::<Bucket<K, V>>(
-                    self.value_size + self.key_size,
-                )) as *mut Bucket<K, V>
+                .byte_add(round_to_boundary::<Bucket<K, V>>(self.value_size + self.key_size))
+                as *mut Bucket<K, V>
         }
     }
 }
@@ -170,8 +163,8 @@ impl<
             }
             if &bucket.get_key() == key {
                 self.bucket_count -= 1;
-                self.used -= size_of::<Bucket<K, V>>()
-                    + round_to_boundary::<Bucket<K, V>>(bucket.value_size + bucket.key_size);
+                self.used -=
+                    size_of::<Bucket<K, V>>() + round_to_boundary::<Bucket<K, V>>(bucket.value_size + bucket.key_size);
                 unsafe {
                     // Shift all the next memory back.
                     if !next_bucket.is_null() {
@@ -264,6 +257,30 @@ impl<'a, K, V> Iterator for SharedMemoryHashMapBucketIter<'a, K, V> {
     }
 }
 
+pub struct SharedMemoryHashMapIter<'a, K, V> {
+    current: usize,
+    current_ptr: *mut Bucket<K, V>,
+    map: &'a SharedMemoryContents<K, V>,
+    lock: LockGuard<'a>,
+}
+
+impl<'a, K: serde::Serialize + serde::Deserialize<'static>, V: serde::Serialize + serde::Deserialize<'static>> Iterator
+    for SharedMemoryHashMapIter<'a, K, V>
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current < self.map.bucket_count {
+            let item = unsafe { &mut *self.current_ptr };
+            self.current += 1;
+            self.current_ptr = item.next();
+            Some((item.get_key(), item.get_value()))
+        } else {
+            None
+        }
+    }
+}
+
 unsafe impl<K: Send, V> Send for SharedMemoryHashMap<K, V> {}
 
 ///
@@ -291,12 +308,9 @@ impl<
         let hashmap = Self {
             shm,
             lock: unsafe {
-                Mutex::new(
-                    ptr as *mut u8,
-                    (ptr as *mut u8).add(Mutex::size_of(Some(ptr))),
-                )
-                .unwrap()
-                .0
+                Mutex::new(ptr as *mut u8, (ptr as *mut u8).add(Mutex::size_of(Some(ptr))))
+                    .unwrap()
+                    .0
             },
             phantom: PhantomData::<(K, V)>,
         };
@@ -316,6 +330,18 @@ impl<
         }
 
         Ok(hashmap)
+    }
+
+    pub fn iter(&self) -> SharedMemoryHashMapIter<K, V> {
+        let lock = self.lock().unwrap();
+        let contents = unsafe { &mut *(*lock as *mut SharedMemoryContents<K, V>) };
+
+        SharedMemoryHashMapIter {
+            current: 0,
+            current_ptr: contents.buckets_ptr(),
+            map: contents,
+            lock,
+        }
     }
 
     pub fn lock(&self) -> Result<raw_sync::locks::LockGuard<'_>, Box<dyn std::error::Error>> {
@@ -350,9 +376,7 @@ impl<
     pub fn get_lru(&self) -> Option<(K, V)> {
         let lock = self.lock().unwrap();
         let contents = unsafe { &*(*lock as *mut SharedMemoryContents<K, V>) };
-        contents
-            .get_lru()
-            .map(|bucket| (bucket.get_key(), bucket.get_value()))
+        contents.get_lru().map(|bucket| (bucket.get_key(), bucket.get_value()))
     }
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
@@ -400,13 +424,11 @@ impl<
     pub fn size_of(key: &K, value: &V) -> usize {
         let value_size = bincode::serialized_size(value).unwrap() as usize;
         let key_size = bincode::serialized_size(key).unwrap() as usize;
-        size_of::<Bucket<K, V>>() + value_size + key_size
+        size_of::<Bucket<K, V>>() + round_to_boundary::<Bucket<K, V>>(value_size + key_size)
     }
 }
 
-impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> Clone
-    for SharedMemoryHashMap<K, V>
-{
+impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> Clone for SharedMemoryHashMap<K, V> {
     fn clone(&self) -> Self {
         let shm_conf = ShmemConf::default().size(self.shm.len());
         let shm = shm_conf.os_id(self.shm.get_os_id()).open().unwrap();
@@ -414,12 +436,9 @@ impl<K: PartialEq, V: serde::Serialize + serde::Deserialize<'static>> Clone
         Self {
             shm,
             lock: unsafe {
-                Mutex::from_existing(
-                    ptr as *mut u8,
-                    (ptr as *mut u8).add(Mutex::size_of(Some(ptr))),
-                )
-                .unwrap()
-                .0
+                Mutex::from_existing(ptr as *mut u8, (ptr as *mut u8).add(Mutex::size_of(Some(ptr))))
+                    .unwrap()
+                    .0
             },
             phantom: PhantomData::<(K, V)>,
         }
