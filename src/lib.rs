@@ -1,5 +1,3 @@
-#![feature(pointer_byte_offsets)]
-
 use raw_sync::locks::{LockGuard, LockImpl, LockInit, Mutex};
 use std::ptr::slice_from_raw_parts;
 use std::time::Instant;
@@ -55,14 +53,15 @@ impl<K, V> Bucket<K, V> {
         unsafe { (self as *const Bucket<K, V>).add(1) as *mut u8 }
     }
     fn value_ptr(&self) -> *mut u8 {
-        unsafe { (self as *const Bucket<K, V>).add(1).byte_add(self.key_size) as *mut u8 }
+        // To add a specific amount of bytes, instead of using `byte_add()` which is not in stable Rust yet,
+        // we have to cash to a pointer of u8 and use .add().
+        unsafe { ((self as *const Bucket<K, V>).add(1) as *mut u8).add(self.key_size) }
     }
     fn next(&self) -> *mut Bucket<K, V> {
         unsafe {
-            (self as *const Bucket<K, V>)
-                .add(1)
-                .byte_add(round_to_boundary::<Bucket<K, V>>(self.value_size + self.key_size))
-                as *mut Bucket<K, V>
+            let ptr = (self as *const Bucket<K, V>).add(1) as *mut u8;
+            let ptr = ptr.add(round_to_boundary::<Bucket<K, V>>(self.value_size + self.key_size));
+            ptr as *mut Bucket<K, V>
         }
     }
 }
@@ -121,7 +120,7 @@ impl<
             }
         }
 
-        let ptr = unsafe { self.buckets_ptr().byte_add(self.used) };
+        let ptr = unsafe { (self.buckets_ptr() as *mut u8).add(self.used) as *mut Bucket<K, V> };
         unsafe {
             core::ptr::copy(&bucket, ptr, 1);
             self.bucket_count += 1;
