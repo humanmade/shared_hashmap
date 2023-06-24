@@ -1,6 +1,6 @@
 [package]
 name = "shared_hashmap"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Joe Hoyle"]
 description = "A shared hashmap for use between processes, using shared memory"
