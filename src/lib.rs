@@ -108,6 +108,9 @@ impl<
             return Err(Error::TooLargeError);
         }
 
+        if self.contains_key(&key) {
+            self.remove(&key);
+        }
         let mut removed = None;
         while self.used() + size_of::<Bucket<K, V>>() + value_size + key_size > self.size {
             match self.evict() {
