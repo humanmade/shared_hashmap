@@ -31,7 +31,7 @@ fn test_get_immutable() {
     let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert("Hello", "World".to_owned());
     let mut value = map.get(&"Hello").unwrap();
-    value.push_str("!");
+    value.push('!');
     assert_eq!(map.get(&"Hello"), Some("World".to_owned()));
 }
 
@@ -125,8 +125,8 @@ fn test_remove() {
 fn test_contains_key() {
     let mut map = SharedMemoryHashMap::new(1024).unwrap();
     map.insert(1, 1);
-    assert_eq!(map.contains_key(&1), true);
-    assert_eq!(map.contains_key(&2), false);
+    assert!(map.contains_key(&1));
+    assert!(!map.contains_key(&2));
 }
 
 #[test]
@@ -144,8 +144,8 @@ fn test_clear() {
 
 #[test]
 fn test_clone() {
-    let mut map = SharedMemoryHashMap::new(1024).unwrap();
-    let mut map2 = map.clone();
+    let mut map: SharedMemoryHashMap<i32, i32> = SharedMemoryHashMap::new(1024).unwrap();
+    let mut map2 = map.try_clone().unwrap();
     map.insert(1, 1);
     assert_eq!(map2.get(&1), Some(1));
 
@@ -161,6 +161,20 @@ fn test_used() {
     let used = map.used();
     map.insert(2, 2);
     assert!(map.used() > used);
+    map.remove(&2);
+    assert_eq!(map.used(), used);
+
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
+    let used = map.used();
+    map.insert(1, 1);
+    map.remove(&1);
+    assert_eq!(map.used(), used);
+
+    let mut map = SharedMemoryHashMap::new(1024).unwrap();
+    let used = map.used();
+    map.insert(1, 1);
+    map.clear();
+    assert_eq!(map.used(), used);
 }
 
 #[test]
@@ -177,8 +191,8 @@ fn test_race_condition() {
     map.insert(2, 2);
     map.insert(3, 3);
 
-    let mut map2 = map.clone();
-    let mut map3 = map.clone();
+    let mut map2 = map.try_clone().unwrap();
+    let mut map3 = map.try_clone().unwrap();
 
     spawn(move || {
         for i in 100..2000 {
